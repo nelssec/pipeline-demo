@@ -1,0 +1,230 @@
+name: PHP2Shell remediation (Qualys QFlow)
+
+# Started by the "PHP2Shell: running container -> source repo" QFlow (qflow/README.md) via
+# POST /repos/{owner}/{repo}/dispatches with event_type qualys-php2shell, or by hand.
+#
+# 1. Confirm: scan the image Qualys reported and look for the PHP2Shell QIDs/CVEs, so a
+#    stale finding does not open a PR.
+# 2. Fix: bump php/Dockerfile to the fixed PHP release (qscanner patch cannot bump base
+#    images or the PHP runtime).
+# 3. Verify: rebuild and rescan; fail if PHP2Shell is still there.
+# 4. Open (or update) one PR on branch qualys/php2shell. The QFlow re-sends the dispatch on
+#    every run until the fix is deployed, so the fixed branch name keeps it to one PR.
+
+on:
+  repository_dispatch:
+    types: [qualys-php2shell]
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Image Qualys reported (default ghcr.io/<repo>/php-app:latest)
+        required: false
+        default: ""
+      qid:
+        description: QID Qualys reported
+        required: false
+        default: "6877310"
+
+permissions:
+  contents: write
+  pull-requests: write
+  packages: read
+
+concurrency:
+  group: php2shell-remediation
+  cancel-in-progress: false
+
+env:
+  DOCKERFILE: php/Dockerfile
+  CANDIDATE: php2shell-candidate:${{ github.run_id }}
+  # Detection QIDs and CVEs for PHP2Shell: 389102 (PHP), 6877310 (Ubuntu USN-8948-1, what
+  # php/Dockerfile trips). QID 45110 is a remote detection only and never appears in an
+  # image report.
+  PHP2SHELL_QIDS: ${{ vars.PHP2SHELL_QIDS || '389102,6877310' }}
+  PHP2SHELL_CVES: CVE-2026-109618,CVE-2026-109619
+
+jobs:
+  remediate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the Qualys finding
+        id: finding
+        env:
+          PAYLOAD_IMAGE: ${{ github.event.client_payload.image || inputs.image }}
+          PAYLOAD_QID: ${{ github.event.client_payload.qid || inputs.qid }}
+          PAYLOAD_REVISION: ${{ github.event.client_payload.revision }}
+          PAYLOAD_CONTAINER: ${{ github.event.client_payload.container_id }}
+          PAYLOAD_HOST: ${{ github.event.client_payload.host }}
+          PAYLOAD_SOURCE: ${{ github.event.client_payload.detected_by }}
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY,,}"
+          image="${PAYLOAD_IMAGE:-ghcr.io/$repo/php-app:latest}"
+          # Only act on images this repo builds. The payload comes from whoever holds the
+          # dispatch token, so it is validated, never interpolated into a command.
+          if ! [[ "$image" =~ ^ghcr\.io/${repo//./\\.}/php-app(:[A-Za-z0-9._-]{1,128}|@sha256:[0-9a-f]{64})$ ]]; then
+            echo "::error::Image '$image' is not a php-app image built by $repo"
+            exit 1
+          fi
+          qid="${PAYLOAD_QID:-6877310}"
+          if ! [[ "$qid" =~ ^[0-9]{1,9}$ ]]; then
+            echo "::error::QID '$qid' is not numeric"
+            exit 1
+          fi
+          revision="${PAYLOAD_REVISION:-}"
+          [[ "$revision" =~ ^[0-9a-f]{7,40}$ ]] || revision=""
+          {
+            echo "image=$image"
+            echo "qid=$qid"
+            echo "revision=$revision"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Qualys finding"
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Source | ${PAYLOAD_SOURCE:-manual} |"
+            echo "| QID | $qid |"
+            echo "| Image | $image |"
+            echo "| Built from commit | ${revision:-unknown} |"
+            echo "| Container | ${PAYLOAD_CONTAINER:-n/a} |"
+            echo "| Host | ${PAYLOAD_HOST:-n/a} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check the Dockerfile on main
+        id: check
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/bump-php-base.py --check "$DOCKERFILE" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Setup qscanner
+        id: qs
+        uses: ./.github/actions/setup-qscanner
+
+      - name: Confirm PHP2Shell in the reported image
+        id: before
+        env:
+          QUALYS_ACCESS_TOKEN: ${{ secrets.QUALYS_ACCESS_TOKEN }}
+          QUALYS_POD: ${{ vars.QUALYS_POD || 'CA1' }}
+          IMAGE: ${{ steps.finding.outputs.image }}
+        run: |
+          set +e
+          set -uo pipefail
+          mkdir -p qscanner-output/before
+          docker pull "$IMAGE" >/dev/null
+          "${{ steps.qs.outputs.path }}" --pod "$QUALYS_POD" \
+            --mode get-report --scan-types pkg --report-format table,json \
+            -o qscanner-output/before \
+            image "$IMAGE" 2>&1 | tee qscanner-output/before/scan.log
+          rc=${PIPESTATUS[0]}
+          .github/scripts/count-php2shell.sh qscanner-output/before "$rc" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Stop on a stale finding
+        if: steps.before.outputs.report == 'true' && steps.before.outputs.hits == '0'
+        run: |
+          echo "::notice::QScanner found no PHP2Shell QIDs/CVEs in ${{ steps.finding.outputs.image }}; nothing to do."
+          echo "QScanner found no PHP2Shell in the reported image; no PR opened." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Main is already fixed
+        if: steps.check.outputs.changed == 'false' && !(steps.before.outputs.report == 'true' && steps.before.outputs.hits == '0')
+        run: |
+          echo "::notice::$DOCKERFILE is already on PHP ${{ steps.check.outputs.current }}. The running container predates the fix: redeploy the latest php-app image."
+          echo "main already uses PHP ${{ steps.check.outputs.current }}; the running workload needs a redeploy, not a PR." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Bump the PHP base image
+        id: bump
+        if: steps.check.outputs.changed == 'true' && !(steps.before.outputs.report == 'true' && steps.before.outputs.hits == '0')
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/bump-php-base.py "$DOCKERFILE" | tee -a "$GITHUB_OUTPUT"
+          git diff -- "$DOCKERFILE"
+
+      - name: Rebuild and rescan
+        id: after
+        if: steps.bump.outputs.changed == 'true'
+        env:
+          QUALYS_ACCESS_TOKEN: ${{ secrets.QUALYS_ACCESS_TOKEN }}
+          QUALYS_POD: ${{ vars.QUALYS_POD || 'CA1' }}
+        run: |
+          set +e
+          set -uo pipefail
+          docker build -t "$CANDIDATE" php/ || exit 1
+          mkdir -p qscanner-output/after
+          "${{ steps.qs.outputs.path }}" --pod "$QUALYS_POD" \
+            --mode get-report --scan-types pkg --report-format table,json \
+            -o qscanner-output/after \
+            image "$CANDIDATE" 2>&1 | tee qscanner-output/after/scan.log
+          rc=${PIPESTATUS[0]}
+          .github/scripts/count-php2shell.sh qscanner-output/after "$rc" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Fail if PHP2Shell survived the bump
+        if: steps.after.outputs.report == 'true' && steps.after.outputs.hits != '0'
+        run: |
+          echo "::error::PHP2Shell is still in the rebuilt image after moving to PHP ${{ steps.bump.outputs.fixed }}"
+          exit 1
+
+      - name: Build pull request body
+        if: steps.bump.outputs.changed == 'true'
+        env:
+          IMAGE: ${{ steps.finding.outputs.image }}
+          QID: ${{ steps.finding.outputs.qid }}
+          REVISION: ${{ steps.finding.outputs.revision }}
+          CURRENT: ${{ steps.bump.outputs.current }}
+          FIXED: ${{ steps.bump.outputs.fixed }}
+          BEFORE: ${{ steps.before.outputs.report == 'true' && steps.before.outputs.hits || 'not available' }}
+          AFTER: ${{ steps.after.outputs.report == 'true' && steps.after.outputs.hits || 'not available' }}
+          SOURCE: ${{ github.event.client_payload.detected_by || 'manual run' }}
+          CONTAINER: ${{ github.event.client_payload.container_id || 'n/a' }}
+          HOST: ${{ github.event.client_payload.host || 'n/a' }}
+        run: |
+          set -euo pipefail
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          cat > qscanner-output/pr-body.md <<EOF
+          Qualys found PHP2Shell (CVE-2026-109618, CVE-2026-109619, QID $QID) in a running container built from this repo. This PR moves \`php/Dockerfile\` from PHP $CURRENT to $FIXED.
+
+          | | |
+          |---|---|
+          | Detected by | $SOURCE |
+          | Running image | \`$IMAGE\` |
+          | Built from commit | ${REVISION:-unknown} |
+          | Container | $CONTAINER |
+          | Host | $HOST |
+          | PHP2Shell findings before (QScanner) | $BEFORE |
+          | PHP2Shell findings after (QScanner) | $AFTER |
+
+          Reports are in the \`qscanner-php2shell-reports\` artifact of [this run]($run_url).
+
+          After merge, **Build and push PHP image** publishes the fixed image. Roll the service onto it (new task definition and \`aws ecs update-service --force-new-deployment\` on Fargate). Qualys rescans the new task on start and the QFlow stops dispatching.
+          EOF
+          cat qscanner-output/pr-body.md
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qscanner-php2shell-reports
+          path: qscanner-output/
+
+      - name: Open pull request
+        if: steps.bump.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: qualys/php2shell
+          delete-branch: true
+          commit-message: "Bump PHP to ${{ steps.bump.outputs.fixed }} for PHP2Shell (QID ${{ steps.finding.outputs.qid }})"
+          author: "Andrew Nelson <andrew@nelssec.com>"
+          committer: "Andrew Nelson <andrew@nelssec.com>"
+          title: "Security: bump PHP to ${{ steps.bump.outputs.fixed }} for PHP2Shell (Qualys)"
+          body-path: qscanner-output/pr-body.md
+          labels: security
+          add-paths: |
+            php/Dockerfile

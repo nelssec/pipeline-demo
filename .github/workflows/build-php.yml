@@ -1,0 +1,83 @@
+name: Build and push PHP image
+
+# Builds the php-app image with OCI provenance labels so Qualys Container Security (and the
+# PHP2Shell QFlow) can trace a running container back to this repo and commit. There is no
+# gate on PHP2Shell here: the demo scenario is a vulnerability disclosed after the image
+# shipped, which Qualys then finds in the running container.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - php/**
+      - .github/workflows/build-php.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}/php-app
+
+jobs:
+  build-scan-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: |
+          set -euo pipefail
+          docker build \
+            --label org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }} \
+            --label org.opencontainers.image.revision=${{ github.sha }} \
+            --label org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            --label com.qualys.cnapp-demo.pipeline=github-actions \
+            --label com.qualys.cnapp-demo.run-id=${{ github.run_id }} \
+            --label com.qualys.cnapp-demo.actor=${{ github.actor }} \
+            -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" php/
+
+      - name: Setup qscanner
+        id: qs
+        uses: ./.github/actions/setup-qscanner
+
+      - name: Scan image (report only)
+        env:
+          QUALYS_ACCESS_TOKEN: ${{ secrets.QUALYS_ACCESS_TOKEN }}
+          QUALYS_POD: ${{ vars.QUALYS_POD || 'CA1' }}
+        run: |
+          set +e
+          set -uo pipefail
+          mkdir -p qscanner-output
+          "${{ steps.qs.outputs.path }}" --pod "$QUALYS_POD" \
+            --mode get-report \
+            --scan-types pkg \
+            --report-format table,json \
+            -o qscanner-output \
+            image "$IMAGE:${{ github.sha }}" 2>&1 | tee qscanner-output/image-scan.log
+          echo "qscanner exit code: ${PIPESTATUS[0]}"
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qscanner-php-image-reports
+          path: qscanner-output/
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Push image
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
+          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:${{ github.sha }}")
+          echo "Pushed $digest (commit ${{ github.sha }}, run ${{ github.run_id }})"
+          echo "Pushed \`$digest\` from commit \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"

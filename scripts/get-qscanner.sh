@@ -4,7 +4,7 @@
 # Env:   QSCANNER_RELEASE_TAG (default: newest qscanner-* release), GH_TOKEN (CI)
 set -euo pipefail
 
-REPO="nelssec/cnapp-demo"
+REPO="nelssec/pipeline-demo"
 DEST="${1:-$(pwd)/bin}"
 mkdir -p "$DEST"
 

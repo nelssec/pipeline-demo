@@ -1,5 +1,5 @@
 name: "Setup QScanner"
-description: "Download the CNAPP demo QScanner build from the nelssec/cnapp-demo GitHub release and expose its path."
+description: "Download the CNAPP demo QScanner build from the nelssec/pipeline-demo GitHub release and expose its path."
 inputs:
   dest:
     description: "Directory to download and extract the qscanner binary into"
