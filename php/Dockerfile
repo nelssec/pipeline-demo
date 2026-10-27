@@ -15,7 +15,7 @@ RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     mkdir /tmp/php; cd /tmp/php; \
     for p in common opcache readline cli fpm; do \
-      curl -fsSLo "php8.3-$p.deb" "https://launchpad.net/ubuntu/+archive/primary/+files/php8.3-${p}_${PHP_PKG_VERSION}_${arch}.deb"; \
+      curl -fsSL --retry 6 --retry-all-errors --retry-delay 10 -o "php8.3-$p.deb" "https://launchpad.net/ubuntu/+archive/primary/+files/php8.3-${p}_${PHP_PKG_VERSION}_${arch}.deb"; \
     done; \
     apt-get install -y --no-install-recommends --allow-downgrades ./*.deb; \
     apt-mark hold php8.3-common php8.3-opcache php8.3-readline php8.3-cli php8.3-fpm; \
