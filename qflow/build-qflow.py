@@ -29,12 +29,14 @@ def main():
                  "pattern": {}, "cloudProvider": "", "selectedServiceName": "", "selectedEventsName": "",
                  "selectedFilters": [{"values": [""], "key": ""}], "patternCheck": {}, "selectedEventsFiltersState": []}},
              "cloudview": {"active": False},
-             "schedule": {"active": True, "value": [{"type": "rate", "value": "rate(15 minutes)"}]}},
+             # Quartz cron, no parentheses: the editor's trigger summary crashes on "rate(...)" values,
+             # and its schedule form enforces a 4-hour minimum.
+             "schedule": {"active": True, "value": [{"type": "rate", "value": "0 0 0/4 1/1 * ? *"}]}},
          "target": {"script": "trigger"}, "selectedResource": None,
          "conditionalSettings": NO_CONDITIONS, "advanceOptions": {}},
         {"id": CS, "name": "CS: running containers with PHP2Shell", "type": "integration-resource", "next": JS, "previous": T,
          "inputs": {
-             "integrationId": "", "provider": "cs", "connection": "", "api": "GET /containers",
+             "integrationId": "", "provider": "cs", "connection": "", "resource": "GET /containers",
              "params": {"filter": CS_FILTER, "pageSize": 50, "sort": "updated:desc"},
              "path": {}, "headers": {}, "pagination": {}},
          "target": {"script": "integration-resource"}, "selectedResource": NO_RESOURCE,
@@ -48,10 +50,10 @@ def main():
          "inputs": {
              "urlResolution": "external", "validateSsl": True, "methodName": "POST",
              "url": "https://api.github.com/repos/obj.repo/dispatches",
-             "headers": [
-                 {"key": "Accept", "value": "application/vnd.github+json"},
-                 {"key": "X-GitHub-Api-Version", "value": "2022-11-28"},
-                 {"key": "User-Agent", "value": "qualys-qflow-php2shell"}],
+             "headers": {
+                 "Accept": "application/vnd.github+json",
+                 "X-GitHub-Api-Version": "2022-11-28",
+                 "User-Agent": "qualys-qflow-php2shell"},
              "bodyType": "json",
              "body": {"event_type": "qualys-php2shell", "client_payload": {
                  "qid": "obj.qid", "image": "obj.image", "revision": "obj.revision",
@@ -69,7 +71,7 @@ def main():
     workflow = {
         "id": WF_ID, "workflow": WF_ID,
         "name": "PHP2Shell: running container to source repo (pipeline-demo)",
-        "description": "Every 15 minutes, finds running containers with PHP2Shell (QID 389102 or 6877310) in "
+        "description": "Every 4 hours, finds running containers with PHP2Shell (QID 389102 or 6877310) in "
                        "Container Security, maps each image to the GitHub repo that built it, and sends a "
                        "repository_dispatch so the repo's pipeline confirms with QScanner, bumps PHP and opens a PR.",
         "revision": None, "state": None, "active": True,

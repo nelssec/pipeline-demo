@@ -11,7 +11,7 @@ This QFlow closes the loop from a running container back to the repo that built 
    4. It opens a PR.
 
 ```
- Schedule (15 min)
+ Schedule (every 4 hours)
    -> CS integration: GET /containers  filter "state:RUNNING and (vulnerabilities.qid:389102 or vulnerabilities.qid:6877310)"
    -> Custom JS: image -> owner/repo (OCI source label, else ghcr.io path), one item per image
    -> HTTP: POST https://api.github.com/repos/{repo}/dispatches  event_type=qualys-php2shell
@@ -39,7 +39,7 @@ QFlow has no inbound webhook trigger and no GitHub node (QFLOW-10883), so the fl
 
 | # | Node | Type | Settings |
 |---|---|---|---|
-| 1 | Trigger | `trigger` | Schedule `rate(15 minutes)`. Manual runs work too |
+| 1 | Trigger | `trigger` | Schedule every 4 hours (Quartz `0 0 0/4 1/1 * ? *`, the editor's minimum). Manual runs work too |
 | 2 | CS: running containers with PHP2Shell | `integration-resource`, provider `cs` (proxies `/csapi/v1.3`, QAS auth) | `GET /containers`, `filter=state:RUNNING and (vulnerabilities.qid:389102 or vulnerabilities.qid:6877310)`, `pageSize=50` |
 | 3 | Map image to source repo | `custom` | Builds one item per image: `repo`, `qid`, `image` (pinned by digest), `revision`, `container_id`, `host`. Drops repos that aren't in `ALLOWED_REPOS` (default `nelssec/pipeline-demo`) |
 | 4 | GitHub repository_dispatch | `http`, `urlResolution: external` | `POST https://api.github.com/repos/obj.repo/dispatches`, Bearer auth, the headers below, and the body below |
@@ -144,7 +144,13 @@ The confirm, bump, rebuild and rescan loop was run locally on that date with the
 
 Hand these to ROC Studio, or check them in the QFlow editor, before the demo:
 
-- **Export format.** The JSON follows the playbooks-hub template shape and the `workflow-model` node types (`trigger`, `integration-resource`, `custom`, `http`). The schedule entry `{"type":"rate","value":"rate(15 minutes)"}` and the integration node's `api` string are my best reading of the source, not taken from a real export. If the import complains, build the four nodes by hand from the table above.
+- **Export format.** The JSON follows the playbooks-hub template shape and the `workflow-model` node types (`trigger`, `integration-resource`, `custom`, `http`), checked against the editor source in `workflow-ui-service`. It loads in the ROC Studio editor. It hasn't been imported into a production QFlow yet.
+
+Three shapes in this JSON matter, from what the editor and worker read:
+
+- **Schedule value.** A `rate` value must be a Quartz cron string with no parentheses. A value like `rate(15 minutes)` crashes the editor's trigger summary with "APPLICATION CRASHED".
+- **Integration node.** The API goes in `resource`, not `api`.
+- **HTTP headers.** These are an object map, not a list.
 - **CS containers response.** It hasn't been confirmed that `vulnerabilities.qid` is accepted on `/containers`. If it isn't, use `/images` with the same filter and add a Filter node for running images. The container fields (`imageSha`, `image`, `labels`, `host`) and whether labels come back at all are also unconfirmed. The Custom node handles several field names and falls back to the GHCR image path, so the repo mapping still works without labels.
 - **QFLOW-10501.** The HTTP node can return 401 with a valid key; the fix is targeted for 1.26.0. If node 4 gets 401, test the same token with the `gh api` command above to rule out the token itself.
 - **Deploy.** Nothing in this repo deploys `php-app` to ECS yet. After the PR merges, `build-php.yml` publishes the fixed image. Rolling the service onto it (new task definition plus `aws ecs update-service --force-new-deployment`) is a manual step or a follow-up job.
