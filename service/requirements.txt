@@ -1,9 +1,9 @@
-flask==2.0.1
-werkzeug==2.0.1
-requests==2.25.1
-pyyaml==5.3.1
-jinja2==2.11.2
-urllib3==1.26.4
+flask==2.2.5
+werkzeug==2.3.8
+requests==2.33.0
+pyyaml==5.4
+jinja2==2.11.3
+urllib3==1.26.19
 transformers==4.30.0
 torch==2.0.0
 openai==1.30.0
